@@ -19,22 +19,20 @@
 import os
 import pwd
 from logging import getLogger
-
+import subprocess
+import re
 
 log = getLogger('butterfly')
 
 
 class User(object):
     def __init__(self, uid=None, name=None):
-        if not uid and not name:
+        if uid is None and not name:
             uid = os.getuid()
         if uid is not None:
             self.pw = pwd.getpwuid(uid)
         else:
-            try:
-                self.pw = pwd.getpwnam(name)
-            except:
-                self.pw = pwd.getpwnam('daemon')
+            self.pw = pwd.getpwnam(name)
         if self.pw is None:
             raise LookupError('Unknown user')
 
@@ -59,13 +57,76 @@ class User(object):
         return self.uid == 0
 
     def __eq__(self, other):
+        if other is None:
+            return False
         return self.uid == other.uid
 
     def __repr__(self):
         return "%s [%r]" % (self.name, self.uid)
 
 
-def get_socket_line(port):
+class Socket(object):
+
+    def __init__(self, socket):
+        sn = socket.getsockname()
+        self.local_addr = sn[0]
+        self.local_port = sn[1]
+        pn = socket.getpeername()
+        self.remote_addr = pn[0]
+        self.remote_port = pn[1]
+        self.user = None
+        self.env = {}
+
+        if not self.local:
+            return
+
+        # If there is procfs, get as much info as we can
+        if os.path.exists('/proc/net'):
+            try:
+                line = get_procfs_socket_line(self.remote_port)
+                self.user = User(uid=int(line[7]))
+                self.env = get_socket_env(line[9])
+            except Exception:
+                log.debug('procfs was no good, aight', exc_info=True)
+
+        if self.user is None:
+            # Try with lsof
+            try:
+                self.user = User(name=get_lsof_socket_line(
+                    self.remote_addr, self.remote_port)[1])
+            except Exception:
+                log.debug('lsof was no good', exc_info=True)
+
+    @property
+    def local(self):
+        return self.remote_addr in ['127.0.0.1', '::1']
+
+    def __repr__(self):
+        return '<Socket L: %s:%d R: %s:%d User: %r>' % (
+            self.local_addr, self.local_port,
+            self.remote_addr, self.remote_port,
+            self.user)
+
+
+# Portable way to get the user, if lsof is installed
+def get_lsof_socket_line(addr, port):
+    # May want to make this into a dictionary in the future...
+    regex = "\w+\s+(?P<pid>\d+)\s+(?P<user>\w+).*\s" \
+            "(?P<laddr>.*?):(?P<lport>\d+)->(?P<raddr>.*?):(?P<rport>\d+)"
+    output = subprocess.check_output(['lsof', '-Pni'])
+    lines = output.split('\n')
+    for line in lines:
+        # Look for local address with peer port
+        match = re.findall(regex, line)
+        if len(match):
+            match = match[0]
+            if int(match[5]) == port:
+                return match
+    raise Exception("Couldn't find a match!")
+
+
+# Linux only socket line get
+def get_procfs_socket_line(port):
     try:
         with open('/proc/net/tcp') as k:
             lines = k.readlines()
@@ -75,7 +136,7 @@ def get_socket_line(port):
                 # We got the socket
                 return line.split()
     except:
-        log.error('getting socket inet4 line fail', exc_info=True)
+        log.debug('getting socket inet4 line fail', exc_info=True)
 
     try:
         with open('/proc/net/tcp6') as k:
@@ -87,10 +148,11 @@ def get_socket_line(port):
                 # We got the socket
                 return line.split()
     except:
-        log.error('getting socket inet6 line fail', exc_info=True)
+        log.debug('getting socket inet6 line fail', exc_info=True)
 
 
-def get_env(inode):
+# Linux only browser environment far fetch
+def get_socket_env(inode):
     for pid in os.listdir("/proc/"):
         if not pid.isdigit():
             continue
@@ -111,38 +173,3 @@ def get_env(inode):
                                         key, val = keyval.split('=', 1)
                                         env[key] = val
                                 return env
-
-
-class Socket(object):
-
-    def __init__(self, socket):
-        sn = socket.getsockname()
-        self.local_addr = sn[0]
-        self.local_port = sn[1]
-        pn = socket.getpeername()
-        self.remote_addr = pn[0]
-        self.remote_port = pn[1]
-        line = get_socket_line(self.remote_port)
-        if line:
-            self.uid = int(line[7])
-            self.inode = line[9]
-        else:
-            self.uid = None
-            self.inode = None
-
-        self.env = {}
-        if self.local:
-            try:
-                self.env = get_env(self.inode)
-            except:
-                log.debug('Unable to get env', exc_info=True)
-
-    @property
-    def local(self):
-        return self.remote_addr in ['127.0.0.1', '::1']
-
-    def __repr__(self):
-        return '<Socket L: %s:%d R: %s:%d Uid: %r Inode: %s %d>' % (
-            self.local_addr, self.local_port,
-            self.remote_addr, self.remote_port,
-            self.uid, self.inode, len(self.env))

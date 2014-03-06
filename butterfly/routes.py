@@ -27,7 +27,7 @@ import tornado.process
 import tornado.ioloop
 import tornado.options
 import sys
-from butterfly import url, Route, utils
+from butterfly import url, Route, utils, __version__
 
 ioloop = tornado.ioloop.IOLoop.instance()
 
@@ -47,41 +47,39 @@ def u(s):
     return s
 
 
-def motd(socket, caller, callee):
+def motd(socket):
     return (
 '''
 B                   `         '
    ;,,,             `       '             ,,,;
    `Y888888bo.       :     :       .od888888Y'
-     8888888888b.     :   :     .d8888888888      AWelcome to RbutterflyB
+     8888888888b.     :   :     .d8888888888
      88888Y'  `Y8b.   `   '   .d8Y'  `Y88888
-    j88888  R.db.B  Yb. '   ' .dY  R.db.B  88888k     AServer running as G%rB
+    j88888  R.db.B  Yb. '   ' .dY  R.db.B  88888k
       `888  RY88YB    `b ( ) d'    RY88YB  888'
-       888b  R'"B        ,',        R"'B  d888        AConnecting to:B
-      j888888bd8gf"'   ':'   `"?g8bd888888k         AHost: G%sB
-        R'Y'B   .8'     d' 'b     '8.   R'Y'X           AUser: G%rB
+       888b  R'"B        ,',        R"'B  d888
+      j888888bd8gf"'   ':'   `"?g8bd888888k
+        R'Y'B   .8'     d' 'b     '8.   R'Y'X
          R!B   .8' RdbB  d'; ;`b  RdbB '8.   R!B
-            d88  R`'B  8 ; ; 8  R`'B  88b             AFrom:B
-           d888b   .g8 ',' 8g.   d888b              AHost: G%sB
-          :888888888Y'     'Y888888888:             AUser: G%rB
-          '! 8888888'       `8888888 !'
+            d88  R`'B  8 ; ; 8  R`'B  88b             Rbutterfly Zv %sB
+           d888b   .g8 ',' 8g.   d888b
+          :888888888Y'     'Y888888888:           AConnecting to:B
+          '! 8888888'       `8888888 !'              G%sB
              '8Y  R`Y         Y'B  Y8'
-R              Y                   Y
-              !                   !X
+R              Y                   Y               AFrom:R
+              !                   !                  G%sX
 
 '''
         .replace('B', '\x1b[34;1m')
         .replace('G', '\x1b[32;1m')
         .replace('R', '\x1b[37;1m')
+        .replace('Z', '\x1b[33;1m')
         .replace('A', '\x1b[37;0m')
         .replace('X', '\x1b[0m')
         .replace('\n', '\r\n')
-        % (
-            server,
-            '%s:%d' % (socket.remote_addr, socket.remote_port),
-            callee,
-            '%s:%d' % (socket.local_addr, socket.local_port),
-            caller or '?'))
+        % (__version__,
+           '%s:%d' % (socket.local_addr, socket.local_port),
+           '%s:%d' % (socket.remote_addr, socket.remote_port)))
 
 
 @url(r'/(?:user/(.+))?/?(?:wd/(.+))?')
@@ -105,36 +103,35 @@ class TermWebSocket(Route, tornado.websocket.WebSocketHandler):
             self.communicate()
 
     def shell(self):
-        while self.callee is None:
+        if self.callee is None:
             user = input('login: ')
             try:
                 self.callee = utils.User(name=user)
             except:
-                print('User %s not found' % user)
+                self.callee = utils.User(name='nobody')
 
         try:
             os.chdir(self.path or self.callee.dir)
         except:
             pass
 
-        shell = tornado.options.options.shell or self.callee.shell
         env = os.environ
         env.update(self.socket.env)
         env["TERM"] = "xterm-256color"
         env["COLORTERM"] = "butterfly"
         env["HOME"] = self.callee.dir
-        env["LOCATION"] = "http%s://%s:%d/" % \
-		("s" if tornado.options.options.secure else "", \
-		tornado.options.options.host, tornado.options.options.port)
+        env["LOCATION"] = "http%s://%s:%d/" % (
+            "s" if tornado.options.options.secure else "",
+            tornado.options.options.host, tornado.options.options.port)
         env["PATH"] = '%s:%s' % (os.path.abspath(os.path.join(
             os.path.dirname(__file__), '..', 'bin')), env.get("PATH"))
-        args = [shell]
 
         if self.socket.local:
             # All users are the same -> launch shell
             if self.caller == self.callee and server == self.callee:
+                args = [tornado.options.options.shell or self.callee.shell]
                 args.append('-i')
-                os.execvpe(shell, args, env)
+                os.execvpe(args[0], args, env)
                 # This process has been replaced
                 return
 
@@ -151,15 +148,21 @@ class TermWebSocket(Route, tornado.websocket.WebSocketHandler):
                     sys.exit(1)
                 os.setuid(daemon.uid)
 
-        args.append('-p')
-        if tornado.options.options.shell:
-            args.append('-s')
-            args.append(tornado.options.options.shell)
+        if os.path.exists('/usr/bin/su'):
+            args = ['/usr/bin/su']
+        else:
+            args = ['/bin/su']
+
+        if sys.platform == 'linux':
+            args.append('-p')
+            if tornado.options.options.shell:
+                args.append('-s')
+                args.append(tornado.options.options.shell)
         args.append(self.callee.name)
-        os.execvpe('/bin/su', args, env)
+        os.execvpe(args[0], args, env)
 
     def communicate(self):
-        self.log.debug('Adding handler')
+        self.log.info('Adding handler')
         fcntl.fcntl(self.fd, fcntl.F_SETFL, os.O_NONBLOCK)
 
         def utf8_error(e):
@@ -181,8 +184,8 @@ class TermWebSocket(Route, tornado.websocket.WebSocketHandler):
             self.fd, self.shell_handler, ioloop.READ | ioloop.ERROR)
 
     def open(self, user, path):
-        if self.request.headers['Origin'] != 'http%s://%s' % \
-		("s" if tornado.options.options.secure else "", 
+        if self.request.headers['Origin'] != 'http%s://%s' % (
+                "s" if tornado.options.options.secure else "",
                 self.request.headers['Host']):
             self.log.warning(
                 'Unauthorized connection attempt: from : %s to: %s' % (
@@ -190,6 +193,7 @@ class TermWebSocket(Route, tornado.websocket.WebSocketHandler):
                     self.request.headers['Host']))
             self.close()
             return
+
         self.socket = utils.Socket(self.ws_connection.stream.socket)
         self.set_nodelay(True)
         self.log.info('Websocket opened %r' % self.socket)
@@ -198,22 +202,19 @@ class TermWebSocket(Route, tornado.websocket.WebSocketHandler):
         self.caller = self.callee = None
         if tornado.options.options.secure:
             cert = self.request.get_ssl_certificate()
-            if cert != None:
+            if cert is not None:
                 for field in cert['subject']:
                     if field[0][0] == 'commonName':
                         self.user = self.callee = field[0][1]
 
-        if self.socket.local:
-            self.caller = utils.User(uid=self.socket.uid)
-        else:
-            # We don't know uid is on the other machine
-            pass
-	
+        # If local we have the user connecting
+        if self.socket.local and self.socket.user is not None:
+            self.caller = self.socket.user
+
         if self.user:
             try:
                 self.callee = utils.User(name=self.user)
             except LookupError:
-                print('User %s not found' % self.user)
                 self.callee = None
 
         # If no user where given and we are local, keep the same user
@@ -221,11 +222,12 @@ class TermWebSocket(Route, tornado.websocket.WebSocketHandler):
         # ie: the one openning a terminal in borwser
         if not self.callee and not self.user and self.socket.local:
             self.callee = self.caller
-        self.write_message(motd(self.socket, self.caller, self.callee))
+        self.write_message(motd(self.socket))
         self.pty()
 
     def on_message(self, message):
         if not hasattr(self, 'writer'):
+            self.on_close()
             self.close()
             return
         if message[0] == 'R':
@@ -243,36 +245,43 @@ class TermWebSocket(Route, tornado.websocket.WebSocketHandler):
             try:
                 read = self.reader.read()
             except IOError:
-                self.log.info('READ>%r' % read)
-                self.write_message('DIE')
-                return
+                read = ''
 
             self.log.info('READ>%r' % read)
-            self.write_message(read.decode('utf-8', 'replace'))
+            if len(read) != 0 and self.ws_connection:
+                self.write_message(read.decode('utf-8', 'replace'))
+            else:
+                events = ioloop.ERROR
 
         if events & ioloop.ERROR:
-            self.log.info('Closing due to ioloop fd handler error')
-            ioloop.remove_handler(self.fd)
-
+            self.log.info('Error on fd, closing')
             # Terminated
             self.on_close()
             self.close()
 
     def on_close(self):
         if getattr(self, 'pid', 0) == 0:
-            self.log.warning('pid is 0')
+            self.log.info('pid is 0')
             return
         try:
             self.writer.write(u('\x04'))
             self.writer.flush()
-        except OSError:
-            self.log.warning('closing term fail', exc_info=True)
+        except Exception:
+            self.log.debug('closing term fail', exc_info=True)
+
         try:
             os.close(self.fd)
-        except OSError:
-            self.log.warning('closing fd fail', exc_info=True)
+        except Exception:
+            self.log.debug('closing fd fail', exc_info=True)
+
         try:
             os.waitpid(self.pid, 0)
-        except OSError:
-            self.log.warning('waitpid fail', exc_info=True)
+        except Exception:
+            self.log.debug('waitpid fail', exc_info=True)
+
+        try:
+            ioloop.remove_handler(self.fd)
+        except Exception:
+            self.log.debug('handler removal fail', exc_info=True)
+
         self.log.info('Websocket closed')

@@ -22,26 +22,31 @@ import tornado.ioloop
 import tornado.httpserver
 import ssl
 
-tornado.options.define("secret", default='secret', help="Secret")
 tornado.options.define("debug", default=False, help="Debug mode")
+tornado.options.define("more", default=False,
+                       help="Debug mode with more verbosity")
 tornado.options.define("host", default='127.0.0.1', help="Server host")
 tornado.options.define("port", default=57575, type=int, help="Server port")
 tornado.options.define("shell", help="Shell to execute at login")
-tornado.options.define("secure", default=False, \
-	help="Choose whether or not to use SSL")
-tornado.options.define("reallysecure", default=False, \
-	help="Require certificate authentication.")
+tornado.options.define("secure", default=False,
+                       help="Choose whether or not to use SSL")
+tornado.options.define("reallysecure", default=False,
+                       help="Require certificate authentication.")
 
 tornado.options.parse_command_line()
 
 import logging
 for logger in ('tornado.access', 'tornado.application',
                'tornado.general', 'butterfly'):
-    logging.getLogger(logger).setLevel(
-        logging.DEBUG if tornado.options.options.debug else logging.WARNING)
+    level = logging.WARNING
+    if tornado.options.options.debug:
+        level = logging.INFO
+        if tornado.options.options.more:
+            level = logging.DEBUG
+    logging.getLogger(logger).setLevel(level)
 
 log = logging.getLogger('butterfly')
-log.debug('Starting server')
+log.info('Starting server')
 ioloop = tornado.ioloop.IOLoop.instance()
 
 
@@ -55,15 +60,16 @@ elif tornado.options.options.secure:
 
 ssl_opts = None
 if tornado.options.options.secure:
-    ssl_opts = dict(certfile="butterfly.crt", keyfile="butterfly.key", \
-	cert_reqs=reqs, ca_certs="butterflyca.crt")
+    ssl_opts = dict(certfile="butterfly.crt", keyfile="butterfly.key",
+                    cert_reqs=reqs, ca_certs="butterflyca.crt")
 
 http_server = tornado.httpserver.HTTPServer(application, ssl_options=ssl_opts)
 http_server.listen(
     tornado.options.options.port, address=tornado.options.options.host)
 
-url = "http%s://%s:%d/*" % ( "s" if tornado.options.options.secure else "",
-    tornado.options.options.host, tornado.options.options.port)
+url = "http%s://%s:%d/*" % ("s" if tornado.options.options.secure else "",
+                            tornado.options.options.host,
+                            tornado.options.options.port)
 
 # This is for debugging purpose
 try:
@@ -78,5 +84,5 @@ else:
              'butterfly/templates/']
     watch({'url': url}, files, unwatch_at_exit=True)
 
-log.debug('Starting loop')
+log.info('Starting loop')
 ioloop.start()
